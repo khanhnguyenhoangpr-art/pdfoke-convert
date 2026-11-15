@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pdfoke-convert",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-15",
+  // Only reachable through the pdfoke site's service binding.
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": { "enabled": true },
+  "containers": [
+    {
+      "class_name": "Converter",
+      "image": "./container/Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 2
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONVERTER", "class_name": "Converter" },
+      { "name": "LIMITER", "class_name": "RateLimiter" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Converter", "RateLimiter"] }]
+}

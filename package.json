@@ -1,0 +1,23 @@
+{
+  "name": "pdfoke-convert",
+  "version": "1.0.0",
+  "description": "pdfoke.com conversion service: PDF to Word and Office to PDF (Cloudflare Worker + Container)",
+  "scripts": {
+    "test": "vitest run",
+    "check": "tsc -p . && vitest run",
+    "deploy": "wrangler deploy"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "AGPL-3.0-only",
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261115.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0",
+    "wrangler": "^4.162.0"
+  },
+  "private": true
+}
