@@ -45,7 +45,11 @@ def _pdf_to_word(src: Path, out: Path) -> None:
             raise PermissionError("encrypted")
     cv = Converter(str(src))
     try:
-        cv.convert(str(out))
+        # Office PDFs are single-column. pdf2docx's column detection mistakes the
+        # two-column letterhead (company / national motto) for a multi-column
+        # layout and emits multi-column section breaks, which makes Word reflow
+        # text across pages. A huge minimum section height disables it.
+        cv.convert(str(out), min_section_height=10000)
     finally:
         cv.close()
 
