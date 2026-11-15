@@ -11,7 +11,7 @@ import { dayKey, KINDS, MAX_BYTES, DAILY_LIMIT, json } from './rules';
 export interface Env {
   CONVERTER: DurableObjectNamespace<Converter>;
   LIMITER: DurableObjectNamespace<RateLimiter>;
-  TURNSTILE_SECRET: string;
+  TURNSTILE_SECRET?: string;
 }
 
 export class Converter extends Container<Env> {
@@ -37,15 +37,17 @@ export class RateLimiter extends DurableObject<Env> {
 
 const INSTANCES = 2; // D14: at most 2 containers
 
-async function verifyTurnstile(token: string | null, ip: string, secret: string): Promise<boolean> {
-  if (!token) return false;
+/** Returns [] when valid, otherwise Cloudflare's error codes (safe to show; never the secret). */
+async function verifyTurnstile(token: string | null, ip: string, secret: string | undefined): Promise<string[]> {
+  if (!secret) return ['server-missing-secret'];
+  if (!token) return ['missing-input-response'];
   const body = new FormData();
-  body.append('secret', secret);
+  body.append('secret', secret.trim());
   body.append('response', token);
-  body.append('remoteip', ip);
+  if (ip !== 'unknown') body.append('remoteip', ip);
   const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body });
-  const data = (await r.json()) as { success?: boolean };
-  return !!data.success;
+  const data = (await r.json()) as { success?: boolean; 'error-codes'?: string[] };
+  return data.success ? [] : (data['error-codes']?.length ? data['error-codes'] : ['unknown']);
 }
 
 export default {
@@ -68,9 +70,8 @@ export default {
     if (!length) return json({ code: 'empty' }, 400);
     if (length > MAX_BYTES) return json({ code: 'too-large' }, 413);
 
-    if (!(await verifyTurnstile(request.headers.get('x-turnstile'), ip, env.TURNSTILE_SECRET))) {
-      return json({ code: 'bot' }, 403);
-    }
+    const tsErrors = await verifyTurnstile(request.headers.get('x-turnstile'), ip, env.TURNSTILE_SECRET);
+    if (tsErrors.length) return json({ code: 'bot', detail: tsErrors.join(',') }, 403);
 
     const counter = limiter();
     const used = await counter.used();
