@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py .
+COPY app.py edit_text.py ./
 
 # Warm up LibreOffice's user profile at build time so the first conversion is faster.
 RUN mkdir -p /tmp/warm && echo "warm" > /tmp/warm/w.txt \

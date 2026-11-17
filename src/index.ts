@@ -1,5 +1,5 @@
 // pdfoke-convert Worker (AGPL-3.0). Fronts the conversion container:
-//   POST /api/convert/:kind   (kind: pdf-to-word | word-to-pdf | excel-to-pdf | ppt-to-pdf)
+//   POST /api/convert/:kind   (kind: pdf-to-word | word-to-pdf | excel-to-pdf | ppt-to-pdf | edit-text)
 //   GET  /api/convert/quota
 // Guards: Cloudflare Turnstile token, 25 MB max, 10 successful conversions per IP per
 // Vietnam calendar day (shared across kinds). Reached only through the pdfoke site's

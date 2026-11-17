@@ -1,11 +1,13 @@
 """pdfoke-convert container: Office ↔ PDF conversions.
 
 POST /convert/{kind}  body = file bytes, header X-Filename = original name
-  kind: pdf-to-word | word-to-pdf | excel-to-pdf | ppt-to-pdf
+  kind: pdf-to-word | word-to-pdf | excel-to-pdf | ppt-to-pdf | edit-text
+  edit-text body = one line of JSON edits, "\n", then the PDF bytes (D26).
 Files live only in a per-request temporary directory that is deleted before the
 response is sent. Nothing is logged except kind, size and duration.
 """
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -23,6 +25,7 @@ KINDS = {
     "word-to-pdf": ({".doc", ".docx", ".odt", ".rtf"}, ".pdf", "application/pdf"),
     "excel-to-pdf": ({".xls", ".xlsx", ".ods", ".csv"}, ".pdf", "application/pdf"),
     "ppt-to-pdf": ({".ppt", ".pptx", ".odp"}, ".pdf", "application/pdf"),
+    "edit-text": ({".pdf"}, ".pdf", "application/pdf"),
 }
 
 app = FastAPI()
@@ -72,6 +75,34 @@ async def _libreoffice_to_pdf(src: Path, outdir: Path) -> Path:
     return out
 
 
+async def _edit_text(body: bytes, name: str, started: float) -> Response:
+    from edit_text import EditError, edit_pdf
+
+    nl = body.find(b"\n")
+    if nl <= 0:
+        return err(400, "bad-request")
+    try:
+        edits = json.loads(body[:nl].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return err(400, "bad-request")
+    pdf = body[nl + 1:]
+    del body
+    try:
+        async with _lock:
+            data, n = await asyncio.wait_for(asyncio.to_thread(edit_pdf, pdf, edits), TIMEOUT_S)
+    except EditError as e:
+        status = {"encrypted": 422, "signed": 422, "not-found": 422}.get(e.code, 400)
+        return err(status, e.code)
+    except asyncio.TimeoutError:
+        return err(504, "timeout")
+    except Exception as e:  # noqa: BLE001 - report a code, never the file content
+        return err(422, "corrupt", str(e))
+    print(f"edit-text in={len(pdf)} edits={n} out={len(data)} ms={int((time.monotonic()-started)*1000)}", flush=True)
+    stem = Path(name).stem or "file"
+    return Response(data, media_type="application/pdf",
+                    headers={"x-output-name": (stem + ".pdf").encode("utf-8").decode("latin-1", "ignore")})
+
+
 @app.get("/health")
 async def health():
     return {"ok": True}
@@ -94,6 +125,8 @@ async def convert(kind: str, request: Request):
 
     started = time.monotonic()
     size_in = len(body)
+    if kind == "edit-text":
+        return await _edit_text(body, name, started)
     tmp = Path(tempfile.mkdtemp(prefix="cv-"))
     try:
         src = tmp / f"input{ext}"
