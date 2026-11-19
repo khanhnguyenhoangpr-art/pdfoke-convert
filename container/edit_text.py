@@ -13,18 +13,25 @@ text and an alignment hint. The server:
      table line, the next text on the row or the page's text margin), aligned left, centre,
      right or justified.
 
+Translation (mode "translate", PDF translation tool): the whole paragraph takes its dominant
+style (a character diff between two languages means nothing), and the text is shrunk in 5%
+steps (down to 60%) until it fits between the paragraph's top and the next text below it, so a
+longer translation does not run over the following paragraph or table row.
+
 Fonts: Liberation Serif / Sans / Mono, metric-compatible with Times New Roman / Arial /
 Courier New and covering Vietnamese. Refuses digitally signed and encrypted PDFs.
 """
 from __future__ import annotations
 
 import difflib
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 
 import pymupdf
 
 FONT_DIR = "/usr/share/fonts/truetype/liberation"
 MAX_EDITS = 500
+MAX_TRANSLATE_EDITS = 4000  # a translated document sends every paragraph (30 pages at most)
 MAX_TEXT = 5000
 
 
@@ -230,6 +237,12 @@ def _restyle(old: list[tuple[str, Style]], new_text: str) -> list[tuple[str, Sty
     return list(zip(new_text, styles))  # type: ignore[arg-type]
 
 
+def _dominant(old: list[tuple[str, Style]], new_text: str) -> list[tuple[str, Style]]:
+    counts = Counter(st for c, st in old if not c.isspace())
+    st = counts.most_common(1)[0][0] if counts else old[0][1]
+    return [(c, st) for c in new_text]
+
+
 # ---------- layout ----------
 
 def _runs(word: list[tuple[str, Style]]) -> list[tuple[str, Style]]:
@@ -314,6 +327,21 @@ def layout(chars, first_x: float, rest_x: float, right: float, base0: float, lea
     return placed, len(rows)
 
 
+def fit_layout(chars, first_x: float, rest_x: float, right: float, base0: float, leading: float, align: str,
+               top: float, bound: float):
+    """Like layout(), shrinking the text (and line spacing) until the last line sits above `bound`."""
+    placed: list = []
+    for step in range(9):  # 100%, 95% … 60%
+        k = 1 - 0.05 * step
+        scaled = [(c, replace(st, size=round(st.size * k, 2))) for c, st in chars] if step else chars
+        b0 = top + (base0 - top) * k
+        placed, n = layout(scaled, first_x, rest_x, right, b0, leading * k, align)
+        size = max((st.size for _, st in scaled), default=0)
+        if b0 + (n - 1) * leading * k + 0.22 * size <= bound:
+            return placed
+    return placed
+
+
 # ---------- main ----------
 
 def _paragraph(lines: list[Line], rect: pymupdf.Rect) -> list[Line]:
@@ -327,7 +355,8 @@ def edit_pdf(data: bytes, edits: list[dict]) -> tuple[bytes, int]:
     """Apply paragraph edits; returns (pdf bytes, number of edits applied)."""
     if not isinstance(edits, list) or not edits:
         raise EditError("no-edits")
-    if len(edits) > MAX_EDITS:
+    translating = all(isinstance(e, dict) and e.get("mode") == "translate" for e in edits)
+    if len(edits) > (MAX_TRANSLATE_EDITS if translating else MAX_EDITS):
         raise EditError("too-many-edits")
     doc = pymupdf.open(stream=data, filetype="pdf")
     try:
@@ -348,7 +377,7 @@ def edit_pdf(data: bytes, edits: list[dict]) -> tuple[bytes, int]:
                 raise EditError("bad-request")
             if align not in ("left", "center", "right", "justify"):
                 align = "left"
-            by_page.setdefault(p, []).append({"box": box, "text": text.replace("\r", ""), "align": align})
+            by_page.setdefault(p, []).append({"box": box, "text": text.replace("\r", ""), "align": align, "translate": e.get("mode") == "translate"})
 
         applied = 0
         for pno, items in by_page.items():
@@ -361,6 +390,7 @@ def edit_pdf(data: bytes, edits: list[dict]) -> tuple[bytes, int]:
             edges = _vertical_edges(page)
             margin_r = max((l.x1 for l in lines), default=page.rect.width - 72)
             margin_l = min((l.x0 for l in lines), default=72)
+            bottom = page.rect.height - 18
             plans = []
             for it in items:
                 x0, y0, x1, y1 = it["box"]
@@ -390,11 +420,21 @@ def edit_pdf(data: bytes, edits: list[dict]) -> tuple[bytes, int]:
                         first_x = rest_x = _left_limit(edges, lines, ln, margin_l)
                     else:
                         right = lim_r
-                leading = (para[-1].baseline - para[0].baseline) / (len(para) - 1) if len(para) > 1 else 1.2 * para[0].size
+                # several pieces can share a baseline (a table row split at wide gaps): count distinct baselines
+                bases = sorted({round(l.baseline, 1) for l in para})
+                leading = (bases[-1] - bases[0]) / (len(bases) - 1) if len(bases) > 1 else 1.2 * para[0].size
                 for ln in para:
                     band = pymupdf.Rect(ln.x0, ln.baseline - 0.55 * ln.size, ln.x1, ln.baseline - 0.15 * ln.size)
                     page.add_redact_annot(band, fill=False, cross_out=False)
-                plans.append((_restyle(old, it["text"]), first_x, rest_x, right, para[0].baseline, leading, align))
+                fit = None
+                if it["translate"]:
+                    # room below: up to the top of the nearest text under this paragraph in the same columns
+                    left = min(first_x, rest_x)
+                    under = [l.baseline - 0.8 * l.size for l in lines
+                             if l.baseline > para[-1].baseline + 0.5 and l.x1 > left + 0.5 and l.x0 < right - 0.5 and l not in para]
+                    fit = (para[0].baseline - 0.8 * para[0].size, min(under, default=bottom))
+                restyled = _dominant(old, it["text"]) if it["translate"] else _restyle(old, it["text"])
+                plans.append((restyled, first_x, rest_x, right, para[0].baseline, leading, align, fit))
             if not plans:
                 if rotation:
                     page.set_rotation(rotation)
@@ -404,9 +444,12 @@ def edit_pdf(data: bytes, edits: list[dict]) -> tuple[bytes, int]:
                 graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
                 text=pymupdf.PDF_REDACT_TEXT_REMOVE,
             )
-            for chars, fx, rx, right, base, leading, align in plans:
+            for chars, fx, rx, right, base, leading, align, fit in plans:
                 if chars:
-                    placed, _ = layout(chars, fx, rx, right, base, leading, align)
+                    if fit:
+                        placed = fit_layout(chars, fx, rx, right, base, leading, align, *fit)
+                    else:
+                        placed, _ = layout(chars, fx, rx, right, base, leading, align)
                     for x, y, text, st in placed:
                         page.insert_text((x, y), text, fontsize=st.size, fontname=st.fontname, fontfile=st.fontfile, color=st.rgb)
                 applied += 1
