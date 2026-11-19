@@ -169,6 +169,28 @@ def _is_signed(doc: pymupdf.Document) -> bool:
     return False
 
 
+def _horizontal_edges(page: pymupdf.Page) -> list[tuple[float, float, float]]:
+    """Horizontal lines and box edges as (y, x_left, x_right): table borders a translation must not cross."""
+    out = []
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001
+        return out
+    for d in drawings:
+        for it in d.get("items", []):
+            if it[0] == "l":
+                p, q = it[1], it[2]
+                if abs(p.y - q.y) < 0.5 and abs(p.x - q.x) > 3:
+                    out.append((p.y, min(p.x, q.x), max(p.x, q.x)))
+            elif it[0] == "re":
+                r = it[1]
+                if r.width > 3:
+                    out.append((r.y0, r.x0, r.x1))
+                    if r.height > 1.5:
+                        out.append((r.y1, r.x0, r.x1))
+    return out
+
+
 def _vertical_edges(page: pymupdf.Page) -> list[tuple[float, float, float]]:
     """Vertical table lines and cell edges as (x, y_top, y_bottom)."""
     out = []
@@ -328,8 +350,9 @@ def layout(chars, first_x: float, rest_x: float, right: float, base0: float, lea
 
 
 def fit_layout(chars, first_x: float, rest_x: float, right: float, base0: float, leading: float, align: str,
-               top: float, bound: float):
-    """Like layout(), shrinking the text (and line spacing) until the last line sits above `bound`."""
+               top: float, bound: float, rows: int = 1):
+    """Like layout(), shrinking the text (and line spacing) until the last line sits above `bound`.
+    Text that needs no more lines than the original (`rows`) is kept at its size: it fits where the original did."""
     placed: list = []
     for step in range(9):  # 100%, 95% … 60%
         k = 1 - 0.05 * step
@@ -337,7 +360,7 @@ def fit_layout(chars, first_x: float, rest_x: float, right: float, base0: float,
         b0 = top + (base0 - top) * k
         placed, n = layout(scaled, first_x, rest_x, right, b0, leading * k, align)
         size = max((st.size for _, st in scaled), default=0)
-        if b0 + (n - 1) * leading * k + 0.22 * size <= bound:
+        if (step == 0 and n <= rows) or b0 + (n - 1) * leading * k + 0.22 * size <= bound:
             return placed
     return placed
 
@@ -391,6 +414,9 @@ def edit_pdf(data: bytes, edits: list[dict]) -> tuple[bytes, int]:
             margin_r = max((l.x1 for l in lines), default=page.rect.width - 72)
             margin_l = min((l.x0 for l in lines), default=72)
             bottom = page.rect.height - 18
+            hedges = None  # read only when translating
+            # a translation may use the page's text width (same margin on the right as on the left)
+            margin_t = max(margin_r, page.rect.width - margin_l)
             plans = []
             for it in items:
                 x0, y0, x1, y1 = it["box"]
@@ -410,7 +436,7 @@ def edit_pdf(data: bytes, edits: list[dict]) -> tuple[bytes, int]:
                 align = it["align"]
                 if len(para) == 1:
                     ln = para[0]
-                    lim_r = _right_limit(edges, lines, ln, right, margin_r)
+                    lim_r = _right_limit(edges, lines, ln, right, margin_t if it["translate"] else margin_r)
                     if align == "center":
                         mid = (ln.x0 + ln.x1) / 2
                         half = max(min(lim_r - mid, mid - _left_limit(edges, lines, ln, margin_l)), (ln.x1 - ln.x0) / 2)
@@ -432,7 +458,12 @@ def edit_pdf(data: bytes, edits: list[dict]) -> tuple[bytes, int]:
                     left = min(first_x, rest_x)
                     under = [l.baseline - 0.8 * l.size for l in lines
                              if l.baseline > para[-1].baseline + 0.5 and l.x1 > left + 0.5 and l.x0 < right - 0.5 and l not in para]
-                    fit = (para[0].baseline - 0.8 * para[0].size, min(under, default=bottom))
+                    if hedges is None:
+                        hedges = _horizontal_edges(page)
+                    # table borders and box edges below the last line (a little under the baseline counts: descenders)
+                    under += [y - 1 for y, ex0, ex1 in hedges
+                              if y > para[-1].baseline + 0.15 * para[-1].size and ex1 > left + 0.5 and ex0 < right - 0.5]
+                    fit = (para[0].baseline - 0.8 * para[0].size, min(under, default=bottom), len(bases))
                 restyled = _dominant(old, it["text"]) if it["translate"] else _restyle(old, it["text"])
                 plans.append((restyled, first_x, rest_x, right, para[0].baseline, leading, align, fit))
             if not plans:
