@@ -10,7 +10,7 @@ that service.
 
 ## How it works
 - `src/index.ts` – Worker: checks a Cloudflare Turnstile token, a 25 MB size limit and a
-  quota of 10 successful conversions per IP per day (Vietnam time), then forwards the file
+  quota of 20 successful conversions per IP per day (Vietnam time), then forwards the file
   to one of at most 2 containers.
 - `container/` – Python (FastAPI) service:
   - PDF → Word with pdf2docx
